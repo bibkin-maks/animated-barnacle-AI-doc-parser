@@ -10,3 +10,4 @@ python-jose
 python-multipart
 google-auth
 pypdf
+faiss-cpu
