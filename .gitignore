@@ -1,0 +1,5 @@
+__*
+.env
+node_*
+uploaded_documents/*
+front-chatdoc/node*
