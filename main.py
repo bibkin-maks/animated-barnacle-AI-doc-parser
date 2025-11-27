@@ -210,18 +210,20 @@ def query_doc(question: str, token: str):
     matched_chunks = 0
     document_used = None
 
-    # If PDF exists → extract context
-    if not is_document_empty(doc):
+    # If PDF exists AND has chunks → use them
+    if not is_document_empty(doc) and doc.get("chunks"):
         chunks = doc["chunks"]
-        vector_store = FAISS.from_texts(chunks, embedding=embeddings)
-        docs = vector_store.similarity_search(question, k=3)
 
-        context = "\n".join(d.page_content for d in docs)
-        matched_chunks = len(docs)
-        document_used = doc["name"]
-        system_prompt = "Answer ONLY using the document context."
+        if len(chunks) > 0:
+            vector_store = FAISS.from_texts(chunks, embedding=embeddings)
+            docs = vector_store.similarity_search(question, k=3)
 
-    # Build messages dynamically
+            context = "\n".join(d.page_content for d in docs)
+            matched_chunks = len(docs)
+            document_used = doc["name"]
+            system_prompt = "Answer ONLY using the document context."
+
+    # Build messages
     user_prompt = (
         f"Question: {question}\n\nContext:\n{context}"
         if context
@@ -238,7 +240,6 @@ def query_doc(question: str, token: str):
 
     ai_text = response.choices[0].message.content
 
-    # Save chat
     add_message_to_user(user, "user", question)
     add_message_to_user(user, "AI", ai_text)
 
@@ -247,6 +248,7 @@ def query_doc(question: str, token: str):
         "matched_chunks": matched_chunks,
         "document_used": document_used
     }
+
 
 # -------------------------------------------------------------------
 # Upload — NO FILE SAVED
