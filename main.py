@@ -1,14 +1,13 @@
 from fastapi import FastAPI, File, UploadFile, HTTPException, Header
 from pydantic import BaseModel
 import os
+import io
 from dotenv import load_dotenv
 from openai import OpenAI
 from langchain_community.vectorstores import FAISS
 from langchain_openai import OpenAIEmbeddings
 from langchain_text_splitters import CharacterTextSplitter
-import shutil
 from typing import List
-from langchain_community.document_loaders import PyPDFLoader
 from fastapi.middleware.cors import CORSMiddleware
 from google.oauth2 import id_token
 from google.auth.transport import requests
@@ -18,6 +17,7 @@ import urllib.parse
 from pymongo.mongo_client import MongoClient
 from pymongo.server_api import ServerApi
 from secrets import token_hex
+from PyPDF2 import PdfReader
 
 # -------------------------------------------------------------------
 # Helpers
@@ -28,31 +28,45 @@ def empty_document():
     return {"name": "", "chunks": []}
 
 def is_document_empty(doc):
-    """Correctly detect an empty file in ALL formats."""
+    """Return True if document struct has no real content."""
     if not doc:
         return True
 
     name = doc.get("name", "")
     chunks = doc.get("chunks", "")
 
-    if name in ["", None, "empty file"]:
+    if not name or name == "empty file":
         return True
 
-    # chunks is list of empty message
-    if isinstance(chunks, list) and (
-        len(chunks) == 0 or chunks[0] == "Nothing here yet"
-    ):
+    if isinstance(chunks, list) and (len(chunks) == 0 or (chunks and chunks[0] == "Nothing here yet")):
         return True
 
-    # chunks is empty string
     if isinstance(chunks, str) and chunks.strip() == "":
         return True
 
     return False
 
 # -------------------------------------------------------------------
+# PDF Processing — Read file from memory, no disk
+# -------------------------------------------------------------------
+
+def process_pdf_bytes(file_bytes: bytes) -> List[str]:
+    reader = PdfReader(io.BytesIO(file_bytes))
+    full_text = ""
+
+    for page in reader.pages:
+        extracted = page.extract_text() or ""
+        full_text += extracted + "\n"
+
+    splitter = CharacterTextSplitter(chunk_size=1000, chunk_overlap=0)
+    chunks = splitter.split_text(full_text)
+
+    return chunks
+
+# -------------------------------------------------------------------
 # Load env & Mongo
 # -------------------------------------------------------------------
+
 load_dotenv()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 client = OpenAI(api_key=OPENAI_API_KEY)
@@ -70,11 +84,11 @@ users_collection = db["users"]
 GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
 SECRET_KEY = os.getenv("SECRET_KEY")
 ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 7
 
 # -------------------------------------------------------------------
 # FastAPI
 # -------------------------------------------------------------------
+
 app = FastAPI()
 
 app.add_middleware(
@@ -90,90 +104,45 @@ app.add_middleware(
 # -------------------------------------------------------------------
 # Embeddings
 # -------------------------------------------------------------------
+
 embeddings = OpenAIEmbeddings(model="text-embedding-3-large")
 
-
-
 # -------------------------------------------------------------------
-# Google Token Verification
+# Verify Google OAuth Token
 # -------------------------------------------------------------------
-
 
 def verify_google_token(token):
     try:
         idinfo = id_token.verify_oauth2_token(
-            token,
-            requests.Request(),
-            GOOGLE_CLIENT_ID
+            token, requests.Request(), GOOGLE_CLIENT_ID
         )
-
         return {
-            "sub": idinfo["sub"],              # <-- REQUIRED
-            "user_id": idinfo["sub"],          # optional alias
+            "sub": idinfo["sub"],
             "email": idinfo["email"],
             "name": idinfo.get("name"),
             "picture": idinfo.get("picture"),
         }
-
     except ValueError:
         print("Invalid Google token:", token)
         return None
 
-
 # -------------------------------------------------------------------
-# JWT Creation
+# JWT
 # -------------------------------------------------------------------
 
 def create_jwt(user: dict):
-    print("Creating JWT for user:", user)
-    signing_key = SECRET_KEY + user["jwt_secret"]  # <-- IMPORTANT
-
+    signing_key = SECRET_KEY + user["jwt_secret"]
     payload = {
         "user_id": user["_id"],
         "email": user["email"],
         "exp": datetime.now(timezone.utc) + timedelta(days=7),
         "iat": datetime.now(timezone.utc)
     }
-
     return jwt.encode(payload, signing_key, algorithm="HS256")
-
-
-# -------------------------------------------------------------------
-# User Management
-# -------------------------------------------------------------------
-
-
-def get_or_create_user(idinfo):
-    user_id = idinfo["sub"]
-
-    existing_user = users_collection.find_one({"_id": user_id})
-
-    if existing_user:
-        return existing_user
-
-    new_user = {
-        "_id": user_id,
-        "email": idinfo["email"],
-        "name": idinfo.get("name"),
-        "picture": idinfo.get("picture"),
-        "messages": [{"role": "AI", "content": f"Hello {idinfo.get('name')}! How can I assist you with your documents today?"}],
-        "jwt_secret": token_hex(32),
-        "document": {"name": "","chunks": []}
-    }
-
-    users_collection.insert_one(new_user)   
-    
-
-    return new_user
-
-
 
 def verify_jwt(token: str):
     unverified = jwt.get_unverified_claims(token)
-
-
     user_id = unverified.get("user_id")
-
     if not user_id:
         raise HTTPException(401, "Invalid token")
 
@@ -189,47 +158,61 @@ def verify_jwt(token: str):
     except:
         raise HTTPException(401, "Token invalid or expired")
 
-
-
 # -------------------------------------------------------------------
-# Message Management
+# User Management
 # -------------------------------------------------------------------
 
+def get_or_create_user(idinfo):
+    uid = idinfo["sub"]
+    existing = users_collection.find_one({"_id": uid})
+
+    if existing:
+        return existing
+
+    new_user = {
+        "_id": uid,
+        "email": idinfo["email"],
+        "name": idinfo.get("name"),
+        "picture": idinfo.get("picture"),
+        "messages": [
+            {"role": "AI", "content": f"Hello {idinfo.get('name')}! How can I assist you?"}
+        ],
+        "jwt_secret": token_hex(32),
+        "document": empty_document(),
+    }
+
+    users_collection.insert_one(new_user)
+    return new_user
+
+# -------------------------------------------------------------------
+# Messages
+# -------------------------------------------------------------------
 
 def add_message_to_user(user, role: str, content: str):
-    if user is None:
-        return
-
     users_collection.update_one(
         {"_id": user["_id"]},
         {"$push": {"messages": {"role": role, "content": content}}}
     )
 
+# -------------------------------------------------------------------
+# Query
+# -------------------------------------------------------------------
 
-# -------------------------------------------------------------------
-# PDF Query & Processing
-# -------------------------------------------------------------------
 class QueryRequest(BaseModel):
     question: str
 
-def query(question: str, token: str = None):
+def query_doc(question: str, token: str):
     user = verify_jwt(token)
+    doc = user.get("document")
 
-    # Ensure user has uploaded a document
-    user_doc = user.get("document")
-    if not user_doc or "chunks" not in user_doc or not user_doc["chunks"]:
-        raise HTTPException(400, "You must upload a non-empty document first.")
+    if is_document_empty(doc):
+        raise HTTPException(400, "You must upload a non-empty PDF first.")
 
-    chunks = user_doc["chunks"]      # list of text chunks
-    doc_name = user_doc["name"]
-
-    # Build FAISS vector store IN MEMORY
+    chunks = doc["chunks"]
     vector_store = FAISS.from_texts(chunks, embedding=embeddings)
-
-    # Retrieval: get most relevant chunks
     docs = vector_store.similarity_search(question, k=3)
 
-    context = "\n".join([doc.page_content for doc in docs])
+    context = "\n".join([d.page_content for d in docs])
 
     response = client.chat.completions.create(
         model="gpt-4o-mini",
@@ -241,161 +224,102 @@ def query(question: str, token: str = None):
 
     ai_text = response.choices[0].message.content
 
-    # Save chat history
     add_message_to_user(user, "user", question)
     add_message_to_user(user, "AI", ai_text)
 
     return {
         "answer": ai_text,
-        "document_used": doc_name,
-        "matched_chunks": len(docs),
+        "matched_chunks": len(docs)
     }
 
 # -------------------------------------------------------------------
-# Document Processing
+# Upload — NO FILE SAVED
 # -------------------------------------------------------------------
-
-def process_document(path: str) -> List[str]:
-    loader = PyPDFLoader(path)
-    documents = loader.load()
-
-    splitter = CharacterTextSplitter(chunk_size=1000, chunk_overlap=0)
-    chunks = splitter.split_documents(documents)
-
-    return [c.page_content for c in chunks]
-
-
-# -------------------------------------------------------------------
-# Upload Endpoint   
-# -------------------------------------------------------------------
-
 
 @app.post("/upload/")
-async def upload_document(
-    file: UploadFile = File(...),
-    authorization: str = Header(None)
-):
+async def upload_document(file: UploadFile = File(...), authorization: str = Header(None)):
     user = verify_jwt(authorization.replace("Bearer ", ""))
 
     if not file.filename.endswith(".pdf"):
         raise HTTPException(400, "Only PDFs allowed.")
 
-    path = os.path.join(UPLOAD_FOLDER, file.filename)
-    with open(path, "wb") as f:
-        shutil.copyfileobj(file.file, f)
+    file_bytes = await file.read()
 
-    chunks = process_document(path)
+    try:
+        chunks = process_pdf_bytes(file_bytes)
+    except Exception as e:
+        raise HTTPException(400, f"PDF read error: {str(e)}")
 
     users_collection.update_one(
         {"_id": user["_id"]},
-        {
-            "$set": {
-                "document": {
-                    "name": file.filename,
-                    "chunks": chunks,
-                }
-            }
-        }
+        {"$set": {"document": {"name": file.filename, "chunks": chunks}}}
     )
 
-    return {"message": "Document saved successfully."}
+    return {"message": "PDF processed and stored."}
+
+# -------------------------------------------------------------------
+# Remove File
+# -------------------------------------------------------------------
 
 @app.post("/removefile/")
-async def delete_document(
-    authorization: str = Header(None)
-):
+async def delete_document(authorization: str = Header(None)):
     user = verify_jwt(authorization.replace("Bearer ", ""))
-
-    
-
     users_collection.update_one(
         {"_id": user["_id"]},
-        {
-            "$set": {
-                "document": {
-                    "name": "",
-                    "chunks": [],
-                }
-            }
-        }
+        {"$set": {"document": empty_document()}}
     )
-
-    return {"message": "Document deleted successfully."}
+    return {"message": "Document deleted."}
 
 # -------------------------------------------------------------------
 # Query Endpoint
 # -------------------------------------------------------------------
 
-
 @app.post("/query/")
-async def ask_question(
-    request: QueryRequest, 
-    authorization: str = Header(None)
-):
+async def ask_question(request: QueryRequest, authorization: str = Header(None)):
     if not authorization:
         raise HTTPException(401, "Missing Authorization header")
 
     token = authorization.replace("Bearer ", "")
-
-    verify_jwt(token)
-
-    return query(request.question, token)
-
+    return query_doc(request.question, token)
 
 # -------------------------------------------------------------------
-# User Auth Endpoint
+# Auth
 # -------------------------------------------------------------------
-
 
 @app.post("/userauth/")
 async def user_auth(user: dict):
-    # Implement user authentication logic here
     idinfo = verify_google_token(user.get("token"))
-
-
-    print ("User auth with idinfo:", idinfo)
-
     if not idinfo:
-        raise HTTPException(status_code=401, detail="Invalid Google token")
-    
+        raise HTTPException(401, "Invalid Google token")
+
     user_record = get_or_create_user(idinfo)
     jwt_token = create_jwt(user_record)
     return {"token": jwt_token, "user": user_record}
-        
+
 # -------------------------------------------------------------------
-# Signout Endpoint
+# Signout
 # -------------------------------------------------------------------
 
 @app.post("/signout/")
 async def user_signout(token: str):
     user = verify_jwt(token)
-
-    new_secret = token_hex(32)
-
     users_collection.update_one(
         {"_id": user["_id"]},
-        {"$set": {"jwt_secret": new_secret}}
+        {"$set": {"jwt_secret": token_hex(32)}}
     )
-
-    return {"message": "Signed out successfully"}
+    return {"message": "Signed out"}
 
 # -------------------------------------------------------------------
-# Me Endpoint
+# Me
 # -------------------------------------------------------------------
 
 @app.get("/me")
 async def get_current_user(authorization: str = Header(None)):
-    if not authorization:
-        raise HTTPException(401, "Missing Authorization header")
-
     token = authorization.replace("Bearer ", "")
     user = verify_jwt(token)
-
-    # refetch from DB to guarantee it's up-to-date
     fresh = users_collection.find_one({"_id": user["_id"]})
-
     return fresh
-        
+
 # -------------------------------------------------------------------
 # Main
 # -------------------------------------------------------------------
