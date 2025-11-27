@@ -205,8 +205,7 @@ def query_doc(question: str, token: str):
     user = verify_jwt(token)
     doc = user.get("document")
 
-    if is_document_empty(doc):
-        raise HTTPException(400, "You must upload a non-empty PDF first.")
+
 
     chunks = doc["chunks"]
     vector_store = FAISS.from_texts(chunks, embedding=embeddings)
