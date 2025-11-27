@@ -87,8 +87,6 @@ os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
 
 
-
-
 # -------------------------------------------------------------------
 # Embeddings and Vector Store
 # -------------------------------------------------------------------
@@ -221,8 +219,8 @@ def query(question: str, token: str = None):
 
     # Ensure user has uploaded a document
     user_doc = user.get("document")
-    if not user_doc or "chunks" not in user_doc:
-        raise HTTPException(400, "You must upload a document first.")
+    if not user_doc or "chunks" not in user_doc or not user_doc["chunks"]:
+        raise HTTPException(400, "You must upload a non-empty document first.")
 
     chunks = user_doc["chunks"]      # list of text chunks
     doc_name = user_doc["name"]
