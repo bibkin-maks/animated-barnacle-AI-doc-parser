@@ -160,7 +160,7 @@ def get_or_create_user(idinfo):
         "picture": idinfo.get("picture"),
         "messages": [{"role": "AI", "content": f"Hello {idinfo.get('name')}! How can I assist you with your documents today?"}],
         "jwt_secret": token_hex(32),
-        "document": {"name": "","chunks": []}
+        "document": {"name": "empty file","chunks": ["Nothing here yet"]}
     }
 
     users_collection.insert_one(new_user)   
@@ -314,10 +314,7 @@ async def delete_document(
         {"_id": user["_id"]},
         {
             "$set": {
-                "document": {
-                    "name": "",
-                    "chunks": [],
-                }
+                "document": {"name": "empty file","chunks": ["Nothing here yet"]}
             }
         }
     )
