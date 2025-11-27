@@ -25,7 +25,7 @@ from secrets import token_hex
 
 def empty_document():
     """Return the unified empty-document structure."""
-    return {"name": "empty file", "chunks": ["Nothing here yet"]}
+    return {"name": "", "chunks": []}
 
 def is_document_empty(doc):
     """Correctly detect an empty file in ALL formats."""
