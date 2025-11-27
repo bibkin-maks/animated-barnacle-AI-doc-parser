@@ -205,30 +205,47 @@ def query_doc(question: str, token: str):
     user = verify_jwt(token)
     doc = user.get("document")
 
+    system_prompt = "You are a helpful assistant. Answer normally."
+    context = None
+    matched_chunks = 0
+    document_used = None
 
+    # If PDF exists → extract context
+    if not is_document_empty(doc):
+        chunks = doc["chunks"]
+        vector_store = FAISS.from_texts(chunks, embedding=embeddings)
+        docs = vector_store.similarity_search(question, k=3)
 
-    chunks = doc["chunks"]
-    vector_store = FAISS.from_texts(chunks, embedding=embeddings)
-    docs = vector_store.similarity_search(question, k=3)
+        context = "\n".join(d.page_content for d in docs)
+        matched_chunks = len(docs)
+        document_used = doc["name"]
+        system_prompt = "Answer ONLY using the document context."
 
-    context = "\n".join([d.page_content for d in docs])
+    # Build messages dynamically
+    user_prompt = (
+        f"Question: {question}\n\nContext:\n{context}"
+        if context
+        else question
+    )
 
     response = client.chat.completions.create(
         model="gpt-4o-mini",
         messages=[
-            {"role": "system", "content": "Answer ONLY using the context."},
-            {"role": "user", "content": f"Question: {question}\n\nContext:\n{context}"}
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt}
         ]
     )
 
     ai_text = response.choices[0].message.content
 
+    # Save chat
     add_message_to_user(user, "user", question)
     add_message_to_user(user, "AI", ai_text)
 
     return {
         "answer": ai_text,
-        "matched_chunks": len(docs)
+        "matched_chunks": matched_chunks,
+        "document_used": document_used
     }
 
 # -------------------------------------------------------------------
