@@ -75,6 +75,6 @@ The service stores the parsed document and chat history in MongoDB and uses Open
 
 ### 1. Clone the repo
 
-```bash
-git clone https://github.com/<your-username>/<your-repo>.git
-cd <your-repo>
+```bash[
+git clone https://github.com/bibkin-maks/animated-barnacle-AI-doc-parser
+cd animated-barnacle-AI-doc-parser
